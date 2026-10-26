@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from bw2calc import MethodConfig, MultiLCA
+from bw2calc.errors import InaccurateSolution
 from bw2calc.utils import get_datapackage
 
 # Technosphere
@@ -769,3 +770,21 @@ def test_filter_package_by_identifier_not_found(dps, config, func_units):
     # Verify no resources were found
     total_resources = sum(len(dp.resources) for dp in filtered)
     assert not total_resources
+
+
+def test_residual_check_raises_on_singular_technosphere(dps, config, func_units):
+    mlca = MultiLCA(demands=func_units, method_config=config, data_objs=dps)
+    mlca.lci()
+    singular = mlca.technosphere_matrix.tolil()
+    singular[1, :] = singular[0, :]
+    mlca.technosphere_matrix = singular.tocsc()
+    with np.errstate(all="ignore"), pytest.warns(match="singular"):
+        with pytest.raises(InaccurateSolution, match="relative residual"):
+            mlca.lci_calculation()
+
+
+def test_residual_check_passes_well_posed_system(dps, config, func_units):
+    mlca = MultiLCA(demands=func_units, method_config=config, data_objs=dps)
+    mlca.lci()
+    assert mlca.residual_tolerance == 1e-8
+    assert mlca.supply_arrays

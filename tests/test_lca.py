@@ -14,6 +14,7 @@ import pytest
 from bw2calc import JacobiGMRESLCA
 from bw2calc.errors import (
     EmptyBiosphere,
+    InaccurateSolution,
     InconsistentGlobalIndex,
     NonsquareTechnosphere,
     OutsideTechnosphere,
@@ -1375,6 +1376,105 @@ def test_switch_weighting():
     assert not any(res["matrix"] == "weighting_matrix" for res in lca.packages[0].resources)
     lca.weight()
     assert lca.score == 11 * 42
+
+
+# Residual check
+
+
+def residual_datapackage(coupling=0.5):
+    """Two activities which each consume ``coupling`` of the other's output, technosphere
+    ``[[1, -c], [-c, 1]]``. With ``c = 1`` each consumes all of the other's output, the rows are
+    proportional, and the matrix is singular."""
+    dp = bwp.create_datapackage()
+    dp.add_persistent_vector(
+        matrix="technosphere_matrix",
+        indices_array=np.array([(1, 101), (2, 102), (1, 102), (2, 101)], dtype=bwp.INDICES_DTYPE),
+        data_array=np.array([1.0, 1.0, coupling, coupling]),
+        flip_array=np.array([False, False, True, True]),
+        name="residual-technosphere",
+    )
+    dp.add_persistent_vector(
+        matrix="biosphere_matrix",
+        indices_array=np.array([(10, 101), (10, 102)], dtype=bwp.INDICES_DTYPE),
+        data_array=np.array([1.0, 2.0]),
+        name="residual-biosphere",
+    )
+    return dp
+
+
+def test_residual_check_raises_on_singular_technosphere():
+    # SuperLU returns NaN with only a warning here; PARDISO returns finite junk.
+    lca = LCA({1: 1}, data_objs=[residual_datapackage(coupling=1.0)])
+    with pytest.raises(InaccurateSolution, match="relative residual"):
+        lca.lci()
+
+
+def test_residual_check_raises_on_wrong_finite_solution():
+    lca = LCA({1: 1}, data_objs=[residual_datapackage()])
+    # What PARDISO can do for a singular matrix: finite values which don't solve the system
+    with patch.object(LCA, "_spsolve", lambda self, matrix, rhs: np.array([1e8, 1e8])):
+        with pytest.raises(InaccurateSolution, match="relative residual"):
+            lca.lci()
+        lca.residual_tolerance = None
+        lca.lci()
+    assert lca.supply_array.tolist() == [1e8, 1e8]
+
+
+def test_residual_check_passes_well_posed_system():
+    lca = LCA({1: 1}, data_objs=[residual_datapackage()])
+    lca.lci()
+    assert np.allclose(lca.supply_array, [4 / 3, 2 / 3])
+    lca = LCA({2: 1}, data_objs=[residual_datapackage()])
+    lca.lci()
+    assert np.allclose(lca.supply_array, [2 / 3, 4 / 3])
+
+
+def test_residual_check_passes_ill_conditioned_system():
+    # Condition number of about 2e6: the solution is accurate in the sense that matters, and a
+    # check which flagged it would give false alarms for real databases with strong loops.
+    a = 1 - 1e-6
+    dp = bwp.create_datapackage()
+    dp.add_persistent_vector(
+        matrix="technosphere_matrix",
+        indices_array=np.array([(1, 101), (2, 102), (1, 102), (2, 101)], dtype=bwp.INDICES_DTYPE),
+        data_array=np.array([1.0, 1.0, a, a]),
+        flip_array=np.array([False, False, True, True]),
+        name="loop-technosphere",
+    )
+    dp.add_persistent_vector(
+        matrix="biosphere_matrix",
+        indices_array=np.array([(10, 101), (10, 102)], dtype=bwp.INDICES_DTYPE),
+        data_array=np.array([1.0, 2.0]),
+        name="loop-biosphere",
+    )
+    lca = LCA({1: 1, 2: -1}, data_objs=[dp])
+    lca.lci()
+    assert np.allclose(lca.supply_array, [1 / (1 + a), -1 / (1 + a)])
+
+
+def test_residual_check_with_factorized_solver():
+    lca = LCA({1: 1}, data_objs=[residual_datapackage()])
+    lca.lci(factorize=True)
+    if PYPARDISO:
+        pytest.skip("PARDISO has no stored factorization")
+    # A stored factorization of another matrix gives wrong answers for this one
+    lca.solver = lambda demand: np.array([5.0, 5.0])
+    with pytest.raises(InaccurateSolution):
+        lca.solve_linear_system()
+
+
+def test_residual_check_zero_demand():
+    lca = LCA({1: 1}, data_objs=[residual_datapackage()])
+    lca.lci()
+    # Nothing to be relative to, so the absolute residual is used
+    assert np.allclose(lca.solve_linear_system(np.zeros(2)), 0)
+
+
+def test_residual_tolerance_default_and_override():
+    lca = LCA({1: 1}, data_objs=[residual_datapackage()])
+    assert lca.residual_tolerance == 1e-8
+    lca.residual_tolerance = 1e-12
+    lca.lci()
 
 
 # invert_technosphere

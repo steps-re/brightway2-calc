@@ -1,5 +1,9 @@
 # `bw2calc` Changelog
 
+## Unreleased
+
+* [#163](https://github.com/brightway-lca/brightway2-calc/issues/163): Direct solves in `LCA` and `MultiLCA` now check the relative residual `||A x - b|| / ||b||` and raise `InaccurateSolution` above `residual_tolerance` (default 1e-8, the same as the adjoint solve in `FastScoresOnlyMultiLCA`). Before, a singular technosphere gave NaN with only a `MatrixRankWarning` with SuperLU, or finite junk like supply values around 1e8 with PARDISO, which went straight into the scores. The check costs one sparse matrix-vector product per solve. Set `residual_tolerance = None` on the object to skip it. This doesn't say which activity is responsible; that needs the reference exchange flags and is better done when the database is written
+
 ## 3.1.0 (2026-10-18)
 
 * [#177](https://github.com/brightway-lca/brightway2-calc/issues/177): `IterativeLCA`'s Jacobi preconditioner now divides by the production amounts `A[p(j), j]`, where `p(j)` is the row of the reference product of column `j`, taken from the reference exchange flags (bw_processing `reference_array`). Before, it divided by the diagonal, which for databases with separate product nodes holds arbitrary entries or zeros, so iterative solves silently fell back to the slower stages. On BAFU 2026 v1 with separate product ids, Monte Carlo went from 122 ms to 44 ms per iteration, the same as with shared ids. A new `jacobi_pairing` argument (`"auto"`, `"reference"`, or `"diagonal"`) chooses the pairing; `"auto"` falls back to the diagonal, as before, if the flags are missing or don't pair every column with a unique row; missing flags give a warning to update bw2data. `preconditioner_source` tells which one was used. Requires bw_processing >= 1.6 and matrix_utils >= 0.9

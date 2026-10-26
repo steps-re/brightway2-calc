@@ -372,13 +372,9 @@ class MultiLCA(LCABase):
         """
         count = len(self.dicts.activity)
         demand_matrix = np.vstack([arr for arr in self.demand_arrays.values()]).T
-        self.supply_arrays = {
-            name: arr
-            for name, arr in zip(
-                self.demands,
-                self._spsolve(self.technosphere_matrix, demand_matrix).reshape(count, -1).T,
-            )
-        }
+        solution = self._spsolve(self.technosphere_matrix, demand_matrix).reshape(count, -1)
+        self._check_residual(self.technosphere_matrix, solution, demand_matrix)
+        self.supply_arrays = {name: arr for name, arr in zip(self.demands, solution.T)}
         # Turn 1-d array into diagonal matrix
         self.inventories = mu.SparseMatrixDict(
             [

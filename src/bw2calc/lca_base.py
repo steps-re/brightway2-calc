@@ -9,8 +9,8 @@ import matrix_utils as mu
 import numpy as np
 
 from bw2calc import PYPARDISO, spsolve
-from bw2calc.errors import EmptyBiosphere, NonsquareTechnosphere
-from bw2calc.utils import lu_solver
+from bw2calc.errors import EmptyBiosphere, InaccurateSolution, NonsquareTechnosphere
+from bw2calc.utils import lu_solver, relative_residual
 
 if PYPARDISO:
     from pypardiso.pardiso_wrapper import PyPardisoError, PyPardisoSolver
@@ -58,6 +58,12 @@ class LCABase(Iterator):
     # See https://github.com/brightway-lca/brightway2-calc/issues/158
     _used_pypardiso = False
 
+    # Maximum relative residual ``||A x - b|| / ||b||`` of a direct solve before raising
+    # ``InaccurateSolution``; ``None`` skips the check. Direct solvers can return numbers which
+    # don't solve a singular system: SuperLU gives NaN with a warning, PARDISO gives finite junk.
+    # See https://github.com/brightway-lca/brightway2-calc/issues/163
+    residual_tolerance: Optional[float] = 1e-8
+
     def __getstate__(self) -> dict:
         # A copied solver would point at the same MKL memory as the original, which is freed
         # when the original is garbage collected. Copies start with their own solver instead.
@@ -79,6 +85,23 @@ class LCABase(Iterator):
             weakref.finalize(self, _release_pardiso_solver, self._pardiso_solver)
         self._used_pypardiso = True
         return spsolve(matrix, rhs, solver=self._pardiso_solver)
+
+    def _check_residual(self, matrix, solution, rhs) -> None:
+        """Raise ``InaccurateSolution`` if ``solution`` doesn't solve ``matrix @ x = rhs`` within
+        ``residual_tolerance``. Costs one sparse matrix-vector product."""
+        if self.residual_tolerance is None:
+            return
+        residuals = relative_residual(matrix, solution, rhs)
+        # Negated so that NaN residuals, e.g. from a singular matrix, also fail
+        if not np.all(residuals <= self.residual_tolerance):
+            worst = np.where(np.isfinite(residuals), residuals, np.inf).max()
+            raise InaccurateSolution(
+                f"The solution of the technosphere system has a relative residual of "
+                f"{worst:.3e}, above the tolerance of {self.residual_tolerance:.1e}. The "
+                "technosphere matrix could be singular or badly conditioned, e.g. because of "
+                "activities without a production exchange. Set `residual_tolerance` to `None` "
+                "to skip this check."
+            )
 
     def _has(self, name: str) -> bool:
         """Check for an ``LCA`` attribute or its ``MultiLCA`` equivalent."""
@@ -221,9 +244,11 @@ class LCABase(Iterator):
         if demand is None:
             demand = self.demand_array
         if hasattr(self, "solver"):
-            return self.solver(demand)
+            solution = self.solver(demand)
         else:
-            return self._spsolve(self.technosphere_matrix, demand)
+            solution = self._spsolve(self.technosphere_matrix, demand)
+        self._check_residual(self.technosphere_matrix, solution, demand)
+        return solution
 
     def lci(self, demand: Optional[dict] = None, factorize: bool = False) -> None:
         """
